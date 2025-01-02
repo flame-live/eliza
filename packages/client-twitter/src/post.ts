@@ -28,7 +28,7 @@ const twitterPostTemplate = `
 
 {{providers}}
 
-{{characterPostExamples}}
+{{postExamples}}
 
 {{postDirections}}
 
@@ -51,8 +51,8 @@ Guidelines:
 Actions (respond only with tags):
 [LIKE] - Resonates with interests (9.5/10)
 [RETWEET] - Perfect character alignment (9/10)
-[QUOTE] - Can add unique value (8/10)
-[REPLY] - Memetic opportunity (9/10)
+[QUOTE] - Can add unique value (8.5/10)
+[REPLY] - Memetic opportunity (9.5/10)
 
 Tweet:
 {{currentTweet}}
@@ -101,6 +101,13 @@ export class TwitterPostClient {
     private lastProcessTime: number = 0;
     private stopProcessingActions: boolean = false;
     private isDryRun: boolean;
+    private needsInteractionBeforeTweet: boolean = true;
+    private pendingTweets: Map<string, {
+        type: 'reply' | 'quote',
+        content: string,
+        replyToId?: string,
+        generatedAt: number
+    }> = new Map();
 
     constructor(client: ClientBase, runtime: IAgentRuntime) {
         this.client = client;
@@ -158,14 +165,18 @@ export class TwitterPostClient {
             const randomMinutes =
                 Math.floor(Math.random() * (maxMinutes - minMinutes + 1)) +
                 minMinutes;
-            const delay = randomMinutes * 60 * 1000;
+            const delay = Math.min(randomMinutes * 60 * 1000, 2147483647);
 
-            if (Date.now() > lastPostTimestamp + delay) {
+            if (Date.now() > lastPostTimestamp + delay && !this.needsInteractionBeforeTweet) {
                 await this.generateNewTweet();
+                this.needsInteractionBeforeTweet = true;
+                elizaLogger.log("Setting interaction required before next tweet");
+            } else if (this.needsInteractionBeforeTweet) {
+                elizaLogger.log("Waiting for interaction before generating new tweet");
             }
 
             setTimeout(() => {
-                generateNewTweetLoop(); // Set up next iteration
+                generateNewTweetLoop();
             }, delay);
 
             elizaLogger.log(`Next tweet scheduled in ${randomMinutes} minutes`);
@@ -182,9 +193,10 @@ export class TwitterPostClient {
                         elizaLogger.log(
                             `Next action processing scheduled in ${actionInterval / 1000} seconds`
                         );
-                        // Wait for the full interval before next processing
+                        // Fix: Convert to milliseconds but ensure we don't overflow
+                        const delayMs = Math.min(actionInterval * 1000, 2147483647);
                         await new Promise((resolve) =>
-                            setTimeout(resolve, actionInterval * 60 * 1000) // now in minutes
+                            setTimeout(resolve, delayMs)
                         );
                     }
                 } catch (error) {
@@ -192,8 +204,7 @@ export class TwitterPostClient {
                         "Error in action processing loop:",
                         error
                     );
-                    // Add exponential backoff on error
-                    await new Promise((resolve) => setTimeout(resolve, 30000)); // Wait 30s on error
+                    await new Promise((resolve) => setTimeout(resolve, 30000));
                 }
             }
         };
@@ -910,6 +921,11 @@ export class TwitterPostClient {
                         parsedActions: actionResponse,
                         executedActions,
                     });
+
+                    if (actionResponse.retweet || actionResponse.reply || actionResponse.quote) {
+                        this.needsInteractionBeforeTweet = false;
+                        elizaLogger.log("Interaction performed, enabling new tweet generation");
+                    }
                 } catch (error) {
                     elizaLogger.error(
                         `Error processing tweet ${tweet.id}:`,
@@ -1058,5 +1074,22 @@ export class TwitterPostClient {
 
     async stop() {
         this.stopProcessingActions = true;
+    }
+
+    async generateTweet() {
+        const tweetText = await generateText({
+            runtime: this.runtime,
+            context: twitterPostTemplate,
+            modelClass: ModelClass.SMALL
+        });
+
+        // Skip posting if tweet contains token-related content
+        if (tweetText.toLowerCase().includes('token') ||
+            tweetText.toLowerCase().includes('nft')) {
+            elizaLogger.log('Skipping token-related tweet generation');
+            return null;
+        }
+
+        return tweetText;
     }
 }

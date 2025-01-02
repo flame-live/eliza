@@ -9,8 +9,8 @@ import {
     validateCharacterConfig,
 } from "@elizaos/core";
 
-import { REST, Routes } from "discord.js";
 import { DirectClient } from ".";
+import { TwitterPostClient } from "@elizaos/client-twitter";
 
 export function createApiRouter(
     agents: Map<string, AgentRuntime>,
@@ -104,20 +104,60 @@ export function createApiRouter(
             return;
         }
 
-        const API_TOKEN = runtime.getSetting("DISCORD_API_TOKEN") as string;
-        const rest = new REST({ version: "10" }).setToken(API_TOKEN);
+        // Return empty channels list since Discord is removed
+        res.json({
+            id: runtime.agentId,
+            guilds: [],
+            serverCount: 0
+        });
+    });
+
+    router.get("/agents/:agentId/pending-tweets", (req, res) => {
+        const agentId = req.params.agentId;
+        const runtime = agents.get(agentId);
+
+        if (!runtime) {
+            res.status(404).json({ error: "Runtime not found" });
+            return;
+        }
+
+        const twitterClient = runtime.clients.twitter as TwitterPostClient;
+        const pendingTweets = Array.from(twitterClient.pendingTweets.entries())
+            .map(([id, tweet]) => ({
+                id,
+                ...tweet
+            }));
+
+        res.json({ pendingTweets });
+    });
+
+    router.post("/agents/:agentId/approve-tweet/:tweetId", async (req, res) => {
+        const { agentId, tweetId } = req.params;
+        const runtime = agents.get(agentId);
+
+        if (!runtime) {
+            res.status(404).json({ error: "Runtime not found" });
+            return;
+        }
+
+        const twitterClient = runtime.clients.twitter as TwitterPostClient;
+        const tweet = twitterClient.pendingTweets.get(tweetId);
+
+        if (!tweet) {
+            res.status(404).json({ error: "Tweet not found" });
+            return;
+        }
 
         try {
-            const guilds = (await rest.get(Routes.userGuilds())) as Array<any>;
-
-            res.json({
-                id: runtime.agentId,
-                guilds: guilds,
-                serverCount: guilds.length,
-            });
+            if (tweet.type === 'reply') {
+                await twitterClient.sendReply(tweet.content, tweet.replyToId);
+            } else {
+                await twitterClient.sendQuoteTweet(tweet.content, tweet.replyToId);
+            }
+            twitterClient.pendingTweets.delete(tweetId);
+            res.json({ success: true });
         } catch (error) {
-            console.error("Error fetching guilds:", error);
-            res.status(500).json({ error: "Failed to fetch guilds" });
+            res.status(500).json({ error: "Failed to send tweet" });
         }
     });
 

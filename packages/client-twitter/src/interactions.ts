@@ -93,6 +93,11 @@ export class TwitterInteractionClient {
     constructor(client: ClientBase, runtime: IAgentRuntime) {
         this.client = client;
         this.runtime = runtime;
+        elizaLogger.log('Twitter client initialized:', {
+            hasClient: !!this.client,
+            hasTwitterClient: !!this.client.twitterClient,
+            username: this.client.profile?.username
+        });
     }
 
     async start() {
@@ -113,6 +118,7 @@ export class TwitterInteractionClient {
         const twitterUsername = this.client.profile.username;
         try {
             // Check for mentions
+            elizaLogger.log("Searching for mentions of:", `@${twitterUsername}`);
             const mentionCandidates = (
                 await this.client.fetchSearchTweets(
                     `@${twitterUsername}`,
@@ -121,94 +127,120 @@ export class TwitterInteractionClient {
                 )
             ).tweets;
 
-            elizaLogger.log(
-                "Completed checking mentioned tweets:",
-                mentionCandidates.length
-            );
             let uniqueTweetCandidates = [...mentionCandidates];
-            // Only process target users if configured
+            // Even if no mentions, proceed with target users
+            elizaLogger.log("Searching target users' timelines");
             if (this.client.twitterConfig.TWITTER_TARGET_USERS.length) {
                 const TARGET_USERS = this.client.twitterConfig.TWITTER_TARGET_USERS;
 
                 elizaLogger.log("Processing target users:", TARGET_USERS);
+                let processedUsers = 0;
 
-                if (TARGET_USERS.length > 0) {
-                    // Create a map to store tweets by user
-                    const tweetsByUser = new Map<string, Tweet[]>();
+                // Create a map to store tweets by user
+                const tweetsByUser = new Map<string, Tweet[]>();
 
-                    // Fetch tweets from all target users
-                    for (const username of TARGET_USERS) {
+                // Fetch tweets from all target users
+                for (const username of TARGET_USERS) {
+                    try {
+                        elizaLogger.log(`Fetching tweets for user: ${username} (${++processedUsers}/${TARGET_USERS.length})`);
+                        let searchResponse;
                         try {
-                            const userTweets = (
-                                await this.client.twitterClient.fetchSearchTweets(
-                                    `from:${username}`,
-                                    3,
-                                    SearchMode.Latest
-                                )
-                            ).tweets;
-
-                            // Filter for unprocessed, non-reply, recent tweets
-                            const validTweets = userTweets.filter((tweet) => {
-                                const isUnprocessed =
-                                    !this.client.lastCheckedTweetId ||
-                                    parseInt(tweet.id) >
-                                        this.client.lastCheckedTweetId;
-                                const isRecent =
-                                    Date.now() - tweet.timestamp * 1000 <
-                                    2 * 60 * 60 * 1000;
-
-                                elizaLogger.log(`Tweet ${tweet.id} checks:`, {
-                                    isUnprocessed,
-                                    isRecent,
-                                    isReply: tweet.isReply,
-                                    isRetweet: tweet.isRetweet,
-                                });
-
-                                return (
-                                    isUnprocessed &&
-                                    !tweet.isReply &&
-                                    !tweet.isRetweet &&
-                                    isRecent
-                                );
-                            });
-
-                            if (validTweets.length > 0) {
-                                tweetsByUser.set(username, validTweets);
-                                elizaLogger.log(
-                                    `Found ${validTweets.length} valid tweets from ${username}`
-                                );
-                            }
-                        } catch (error) {
-                            elizaLogger.error(
-                                `Error fetching tweets for ${username}:`,
-                                error
+                            searchResponse = await this.client.twitterClient.fetchSearchTweets(
+                                `from:${username}`,
+                                10,
+                                SearchMode.Latest
                             );
+                            elizaLogger.log(`Completed search for ${username}`);
+
+                        } catch (searchError) {
+                            elizaLogger.error(`Failed to fetch tweets for ${username}:`, {
+                                error: searchError?.message || searchError,
+                                stack: searchError?.stack
+                            });
+                            elizaLogger.log(`Moving to next user after error`);
                             continue;
                         }
-                    }
 
-                    // Select one tweet from each user that has tweets
-                    const selectedTweets: Tweet[] = [];
-                    for (const [username, tweets] of tweetsByUser) {
-                        if (tweets.length > 0) {
-                            // Randomly select one tweet from this user
-                            const randomTweet =
-                                tweets[
-                                    Math.floor(Math.random() * tweets.length)
-                                ];
-                            selectedTweets.push(randomTweet);
+                        const userTweets = Array.isArray(searchResponse) ? searchResponse : (searchResponse?.tweets || []);
+                        elizaLogger.log(`Found ${userTweets.length} tweets from ${username}`);
+
+                        if (userTweets.length === 0) {
+                            elizaLogger.log(`No tweets found for ${username}, trying alternative search...`);
+                            // Try without the 'from:' prefix as fallback
+                            try {
+                                searchResponse = await this.client.twitterClient.fetchSearchTweets(
+                                    username,
+                                    10,
+                                    SearchMode.Latest
+                                );
+                                elizaLogger.log('Fallback search response:', {
+                                    query: username,
+                                    success: !!searchResponse,
+                                    tweetCount: searchResponse?.tweets?.length || 0
+                                });
+                            } catch (fallbackError) {
+                                elizaLogger.error(`Fallback search failed for ${username}:`, fallbackError);
+                            }
+                        }
+
+                        const validTweets = userTweets.filter((tweet) => {
+                            const isUnprocessed =
+                                !this.client.lastCheckedTweetId ||
+                                parseInt(tweet.id) >
+                                    this.client.lastCheckedTweetId;
+                            const isRecent =
+                                Date.now() - tweet.timestamp * 1000 <
+                                2 * 24 * 60 * 60 * 1000;
+
+                            elizaLogger.log(`Tweet ${tweet.id} validation:`, {
+                                isUnprocessed,
+                                isRecent,
+                                text: tweet.text?.substring(0, 50)
+                            });
+
+                            return isUnprocessed && isRecent;
+                        });
+
+                        if (validTweets.length === 0) {
+                            elizaLogger.log(`No valid tweets found for ${username}`);
+                        }
+
+                        if (validTweets.length > 0) {
+                            tweetsByUser.set(username, validTweets);
                             elizaLogger.log(
-                                `Selected tweet from ${username}: ${randomTweet.text?.substring(0, 100)}`
+                                `Found ${validTweets.length} valid tweets from ${username}`
                             );
                         }
+                    } catch (error) {
+                        elizaLogger.error(
+                            `Error fetching tweets for ${username}:`,
+                            error
+                        );
+                        continue;
                     }
-
-                    // Add selected tweets to candidates
-                    uniqueTweetCandidates = [
-                        ...mentionCandidates,
-                        ...selectedTweets,
-                    ];
                 }
+
+                // Select one tweet from each user that has tweets
+                const selectedTweets: Tweet[] = [];
+                for (const [username, tweets] of tweetsByUser) {
+                    if (tweets.length > 0) {
+                        // Randomly select one tweet from this user
+                        const randomTweet =
+                            tweets[
+                                Math.floor(Math.random() * tweets.length)
+                            ];
+                        selectedTweets.push(randomTweet);
+                        elizaLogger.log(
+                            `Selected tweet from ${username}: ${randomTweet.text?.substring(0, 100)}`
+                        );
+                    }
+                }
+
+                // Add selected tweets to candidates
+                uniqueTweetCandidates = [
+                    ...mentionCandidates,
+                    ...selectedTweets,
+                ];
             } else {
                 elizaLogger.log(
                     "No target users configured, processing only mentions"

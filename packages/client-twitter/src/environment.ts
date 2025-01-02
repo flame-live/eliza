@@ -5,7 +5,7 @@ export const DEFAULT_MAX_TWEET_LENGTH = 280;
 const twitterUsernameSchema = z.string()
     .min(1)
     .max(15)
-    .regex(/^[A-Za-z][A-Za-z0-9_]*[A-Za-z0-9]$|^[A-Za-z]$/, 'Invalid Twitter username format');
+    .regex(/^[A-Za-z0-9_]+$/, 'Invalid Twitter username format');
 
 export const twitterEnvSchema = z.object({
     TWITTER_DRY_RUN: z.boolean(),
@@ -17,7 +17,7 @@ export const twitterEnvSchema = z.object({
     TWITTER_2FA_SECRET: z.string(),
     TWITTER_RETRY_LIMIT: z.number().int(),
     TWITTER_POLL_INTERVAL: z.number().int(),
-    TWITTER_TARGET_USERS: z.array(twitterUsernameSchema).default([]),
+    TWITTER_TARGET_USERS: z.array(z.string()).default([]),
     // I guess it's possible to do the transformation with zod
     // not sure it's preferable, maybe a readability issue
     // since more people will know js/ts than zod
@@ -60,16 +60,13 @@ function parseTargetUsers(targetUsersStr?:string | null): string[] {
         return [];
     }
 
-    return targetUsersStr
+    const users = targetUsersStr
         .split(',')
         .map(user => user.trim())
-        .filter(Boolean); // Remove empty usernames
-        /*
-        .filter(user => {
-            // Twitter username validation (basic example)
-            return user && /^[A-Za-z0-9_]{1,15}$/.test(user);
-        });
-        */
+        .filter(Boolean);
+
+    // Validate each username individually
+    return users;
 }
 
 function safeParseInt(value: string | undefined | null, defaultValue: number): number {

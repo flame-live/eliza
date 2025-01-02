@@ -1,7 +1,5 @@
-import { PostgresDatabaseAdapter } from "@elizaos/adapter-postgres";
 import { SqliteDatabaseAdapter } from "@elizaos/adapter-sqlite";
 import { AutoClientInterface } from "@elizaos/client-auto";
-import { DiscordClientInterface } from "@elizaos/client-discord";
 import { FarcasterAgentClient } from "@elizaos/client-farcaster";
 import { LensAgentClient } from "@elizaos/client-lens";
 import { SlackClientInterface } from "@elizaos/client-slack";
@@ -354,32 +352,9 @@ export function getTokenForProvider(
 }
 
 function initializeDatabase(dataDir: string) {
-    if (process.env.POSTGRES_URL) {
-        elizaLogger.info("Initializing PostgreSQL connection...");
-        const db = new PostgresDatabaseAdapter({
-            connectionString: process.env.POSTGRES_URL,
-            parseInputs: true,
-        });
-
-        // Test the connection
-        db.init()
-            .then(() => {
-                elizaLogger.success(
-                    "Successfully connected to PostgreSQL database"
-                );
-            })
-            .catch((error) => {
-                elizaLogger.error("Failed to connect to PostgreSQL:", error);
-            });
-
-        return db;
-    } else {
-        const filePath =
-            process.env.SQLITE_FILE ?? path.resolve(dataDir, "db.sqlite");
-        // ":memory:";
-        const db = new SqliteDatabaseAdapter(new Database(filePath));
-        return db;
-    }
+    const filePath = process.env.SQLITE_FILE ?? path.resolve(dataDir, "db.sqlite");
+    const db = new SqliteDatabaseAdapter(new Database(filePath));
+    return db;
 }
 
 // also adds plugins from character file into the runtime
@@ -397,11 +372,6 @@ export async function initializeClients(
     if (clientTypes.includes(Clients.DIRECT)) {
         const autoClient = await AutoClientInterface.start(runtime);
         if (autoClient) clients.auto = autoClient;
-    }
-
-    if (clientTypes.includes(Clients.DISCORD)) {
-        const discordClient = await DiscordClientInterface.start(runtime);
-        if (discordClient) clients.discord = discordClient;
     }
 
     if (clientTypes.includes(Clients.TELEGRAM)) {
